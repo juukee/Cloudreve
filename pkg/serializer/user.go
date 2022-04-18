@@ -27,17 +27,8 @@ type User struct {
 	CreatedAt      time.Time `json:"created_at"`
 	PreferredTheme string    `json:"preferred_theme"`
 	Anonymous      bool      `json:"anonymous"`
-	Policy         policy    `json:"policy"`
 	Group          group     `json:"group"`
 	Tags           []tag     `json:"tags"`
-}
-
-type policy struct {
-	SaveType       string   `json:"saveType"`
-	MaxSize        string   `json:"maxSize"`
-	AllowedType    []string `json:"allowedType"`
-	UploadURL      string   `json:"upUrl"`
-	AllowGetSource bool     `json:"allowSource"`
 }
 
 type group struct {
@@ -98,13 +89,6 @@ func BuildUser(user model.User) User {
 		CreatedAt:      user.CreatedAt,
 		PreferredTheme: user.OptionsSerialized.PreferredTheme,
 		Anonymous:      user.IsAnonymous(),
-		Policy: policy{
-			SaveType:       user.Policy.Type,
-			MaxSize:        fmt.Sprintf("%.2fmb", float64(user.Policy.MaxSize)/(1024*1024)),
-			AllowedType:    user.Policy.OptionsSerialized.FileType,
-			UploadURL:      user.Policy.GetUploadURL(),
-			AllowGetSource: user.Policy.IsOriginLinkEnable,
-		},
 		Group: group{
 			ID:                   user.GroupID,
 			Name:                 user.Group.Name,

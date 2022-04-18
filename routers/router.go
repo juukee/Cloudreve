@@ -34,6 +34,8 @@ func InitSlaveRouter() *gin.Engine {
 	v3.Use(middleware.SignRequired(auth.General))
 	// 主机信息解析
 	v3.Use(middleware.MasterMetadata())
+	// 禁止缓存
+	v3.Use(middleware.CacheControl())
 
 	/*
 		路由
@@ -46,7 +48,15 @@ func InitSlaveRouter() *gin.Engine {
 		// 接收主机心跳包
 		v3.POST("heartbeat", controllers.SlaveHeartbeat)
 		// 上传
-		v3.POST("upload", controllers.SlaveUpload)
+		upload := v3.Group("upload")
+		{
+			// 上传分片
+			upload.POST(":sessionId", controllers.SlaveUpload)
+			// 创建上传会话上传
+			upload.PUT("", controllers.SlaveGetUploadSession)
+			// 删除上传会话
+			upload.DELETE(":sessionId", controllers.SlaveDeleteUploadSession)
+		}
 		// 下载
 		v3.GET("download/:speed/:path/:name", controllers.SlaveDownload)
 		// 预览 / 外链
@@ -125,7 +135,11 @@ func InitMasterRouter() *gin.Engine {
 	if gin.Mode() == gin.TestMode {
 		v3.Use(middleware.MockHelper())
 	}
+	// 用户会话
 	v3.Use(middleware.CurrentUser())
+
+	// 禁止缓存
+	v3.Use(middleware.CacheControl())
 
 	/*
 		路由
@@ -197,10 +211,10 @@ func InitMasterRouter() *gin.Engine {
 				file.GET("get/:id/:name", controllers.AnonymousGetContent)
 				// 文件外链(301跳转)
 				file.GET("source/:id/:name", controllers.AnonymousPermLink)
-				// 下載已经打包好的文件
-				file.GET("archive/:id/archive.zip", controllers.DownloadArchive)
 				// 下载文件
 				file.GET("download/:id", controllers.Download)
+				// 打包并下载文件
+				file.GET("archive/:sessionID/archive.zip", controllers.DownloadArchive)
 			}
 		}
 
@@ -211,7 +225,15 @@ func InitMasterRouter() *gin.Engine {
 			// 事件通知
 			slave.PUT("notification/:subject", controllers.SlaveNotificationPush)
 			// 上传
-			slave.POST("upload", controllers.SlaveUpload)
+			upload := slave.Group("upload")
+			{
+				// 上传分片
+				upload.POST(":sessionId", controllers.SlaveUpload)
+				// 创建上传会话上传
+				upload.PUT("", controllers.SlaveGetUploadSession)
+				// 删除上传会话
+				upload.DELETE(":sessionId", controllers.SlaveDeleteUploadSession)
+			}
 			// OneDrive 存储策略凭证
 			slave.GET("credential/onedrive/:id", controllers.SlaveGetOneDriveCredential)
 		}
@@ -221,25 +243,29 @@ func InitMasterRouter() *gin.Engine {
 		{
 			// 远程策略上传回调
 			callback.POST(
-				"remote/:key",
+				"remote/:sessionID/:key",
+				middleware.UseUploadSession("remote"),
 				middleware.RemoteCallbackAuth(),
 				controllers.RemoteCallback,
 			)
 			// 七牛策略上传回调
 			callback.POST(
-				"qiniu/:key",
+				"qiniu/:sessionID",
+				middleware.UseUploadSession("qiniu"),
 				middleware.QiniuCallbackAuth(),
 				controllers.QiniuCallback,
 			)
 			// 阿里云OSS策略上传回调
 			callback.POST(
-				"oss/:key",
+				"oss/:sessionID",
+				middleware.UseUploadSession("oss"),
 				middleware.OSSCallbackAuth(),
 				controllers.OSSCallback,
 			)
 			// 又拍云策略上传回调
 			callback.POST(
-				"upyun/:key",
+				"upyun/:sessionID",
+				middleware.UseUploadSession("upyun"),
 				middleware.UpyunCallbackAuth(),
 				controllers.UpyunCallback,
 			)
@@ -247,11 +273,12 @@ func InitMasterRouter() *gin.Engine {
 			{
 				// 文件上传完成
 				onedrive.POST(
-					"finish/:key",
+					"finish/:sessionID",
+					middleware.UseUploadSession("onedrive"),
 					middleware.OneDriveCallbackAuth(),
 					controllers.OneDriveCallback,
 				)
-				// 文件上传完成
+				// OAuth 完成
 				onedrive.GET(
 					"auth",
 					controllers.OneDriveOAuth,
@@ -259,14 +286,14 @@ func InitMasterRouter() *gin.Engine {
 			}
 			// 腾讯云COS策略上传回调
 			callback.GET(
-				"cos/:key",
-				middleware.COSCallbackAuth(),
+				"cos/:sessionID",
+				middleware.UseUploadSession("cos"),
 				controllers.COSCallback,
 			)
 			// AWS S3策略上传回调
 			callback.GET(
-				"s3/:key",
-				middleware.S3CallbackAuth(),
+				"s3/:sessionID",
+				middleware.UseUploadSession("s3"),
 				controllers.S3Callback,
 			)
 		}
@@ -504,10 +531,18 @@ func InitMasterRouter() *gin.Engine {
 			// 文件
 			file := auth.Group("file", middleware.HashID(hashid.FileID))
 			{
-				// 文件上传
-				file.POST("upload", controllers.FileUploadStream)
-				// 获取上传凭证
-				file.GET("upload/credential", controllers.GetUploadCredential)
+				// 上传
+				upload := file.Group("upload")
+				{
+					// 文件上传
+					upload.POST(":sessionId/:index", controllers.FileUpload)
+					// 创建上传会话
+					upload.PUT("", controllers.GetUploadSession)
+					// 删除给定上传会话
+					upload.DELETE(":sessionId", controllers.DeleteUploadSession)
+					// 删除全部上传会话
+					upload.DELETE("", controllers.DeleteAllUploadSession)
+				}
 				// 更新文件
 				file.PUT("update/:id", controllers.PutContent)
 				// 创建空白文件

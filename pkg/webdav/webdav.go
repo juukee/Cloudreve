@@ -14,12 +14,10 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	model "github.com/cloudreve/Cloudreve/v3/models"
 	"github.com/cloudreve/Cloudreve/v3/pkg/filesystem"
-	"github.com/cloudreve/Cloudreve/v3/pkg/filesystem/driver/local"
 	"github.com/cloudreve/Cloudreve/v3/pkg/filesystem/fsctx"
 	"github.com/cloudreve/Cloudreve/v3/pkg/util"
 )
@@ -317,7 +315,6 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, fs *filesyst
 	defer cancel()
 	ctx = context.WithValue(ctx, fsctx.HTTPCtx, r.Context())
 	ctx = context.WithValue(ctx, fsctx.CancelFuncCtx, cancel)
-	ctx = context.WithValue(ctx, fsctx.ValidateCapacityOnceCtx, &sync.Once{})
 
 	fileSize, err := strconv.ParseUint(r.Header.Get("Content-Length"), 10, 64)
 	if err != nil {
@@ -325,7 +322,7 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, fs *filesyst
 	}
 	fileName := path.Base(reqPath)
 	filePath := path.Dir(reqPath)
-	fileData := local.FileStream{
+	fileData := fsctx.FileStream{
 		MIMEType:    r.Header.Get("Content-Type"),
 		File:        r.Body,
 		Size:        fileSize,
@@ -342,7 +339,7 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, fs *filesyst
 		fileList, err := model.RemoveFilesWithSoftLinks([]model.File{*originFile})
 		if err == nil && len(fileList) == 0 {
 			// 如果包含软连接，应重新生成新文件副本，并更新source_name
-			originFile.SourceName = fs.GenerateSavePath(ctx, fileData)
+			originFile.SourceName = fs.GenerateSavePath(ctx, &fileData)
 			fs.Use("AfterUpload", filesystem.HookUpdateSourceName)
 			fs.Use("AfterUploadCanceled", filesystem.HookUpdateSourceName)
 			fs.Use("AfterValidateFailed", filesystem.HookUpdateSourceName)
@@ -350,39 +347,33 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, fs *filesyst
 
 		fs.Use("BeforeUpload", filesystem.HookResetPolicy)
 		fs.Use("BeforeUpload", filesystem.HookValidateFile)
-		fs.Use("BeforeUpload", filesystem.HookChangeCapacity)
+		fs.Use("BeforeUpload", filesystem.HookValidateCapacityDiff)
 		fs.Use("AfterUploadCanceled", filesystem.HookCleanFileContent)
 		fs.Use("AfterUploadCanceled", filesystem.HookClearFileSize)
-		fs.Use("AfterUploadCanceled", filesystem.HookGiveBackCapacity)
 		fs.Use("AfterUploadCanceled", filesystem.HookCancelContext)
 		fs.Use("AfterUpload", filesystem.GenericAfterUpdate)
 		fs.Use("AfterValidateFailed", filesystem.HookCleanFileContent)
 		fs.Use("AfterValidateFailed", filesystem.HookClearFileSize)
-		fs.Use("AfterValidateFailed", filesystem.HookGiveBackCapacity)
 		ctx = context.WithValue(ctx, fsctx.FileModelCtx, *originFile)
+		fileData.Mode |= fsctx.Overwrite
 	} else {
 		// 给文件系统分配钩子
 		fs.Use("BeforeUpload", filesystem.HookValidateFile)
 		fs.Use("BeforeUpload", filesystem.HookValidateCapacity)
 		fs.Use("AfterUploadCanceled", filesystem.HookDeleteTempFile)
-		fs.Use("AfterUploadCanceled", filesystem.HookGiveBackCapacity)
 		fs.Use("AfterUploadCanceled", filesystem.HookCancelContext)
 		fs.Use("AfterUpload", filesystem.GenericAfterUpload)
+		fs.Use("AfterUpload", filesystem.HookGenerateThumb)
 		fs.Use("AfterValidateFailed", filesystem.HookDeleteTempFile)
-		fs.Use("AfterValidateFailed", filesystem.HookGiveBackCapacity)
-		fs.Use("AfterUploadFailed", filesystem.HookGiveBackCapacity)
-
-		// 禁止覆盖
-		ctx = context.WithValue(ctx, fsctx.DisableOverwrite, true)
 	}
 
 	// 执行上传
-	err = fs.Upload(ctx, fileData)
+	err = fs.Upload(ctx, &fileData)
 	if err != nil {
 		return http.StatusMethodNotAllowed, err
 	}
 
-	etag, err := findETag(ctx, fs, h.LockSystem[fs.User.ID], reqPath, &fs.FileTarget[0])
+	etag, err := findETag(ctx, fs, h.LockSystem[fs.User.ID], reqPath, fileData.Model.(*model.File))
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}

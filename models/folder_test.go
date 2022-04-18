@@ -212,12 +212,14 @@ func TestFolder_MoveOrCopyFileTo(t *testing.T) {
 			WithArgs(
 				1,
 				2,
+				3,
 				1,
 				1,
 			).WillReturnRows(
-			sqlmock.NewRows([]string{"id", "size"}).
-				AddRow(1, 10).
-				AddRow(2, 20),
+			sqlmock.NewRows([]string{"id", "size", "upload_session_id"}).
+				AddRow(1, 10, nil).
+				AddRow(2, 20, nil).
+				AddRow(2, 20, &folder.Name),
 		)
 		mock.ExpectBegin()
 		mock.ExpectExec("INSERT(.+)").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -226,7 +228,7 @@ func TestFolder_MoveOrCopyFileTo(t *testing.T) {
 		mock.ExpectExec("INSERT(.+)").WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 		storage, err := folder.MoveOrCopyFileTo(
-			[]uint{1, 2},
+			[]uint{1, 2, 3},
 			&dstFolder,
 			true,
 		)
@@ -335,7 +337,7 @@ func TestFolder_CopyFolderTo(t *testing.T) {
 	// 测试复制目录结构
 	//       test(2)(5)
 	//    1(3)(6)    2.txt
-	//  3(4)(7) 4.txt
+	//  3(4)(7) 4.txt 5.txt(上传中)
 
 	// 正常情况 成功
 	{
@@ -360,9 +362,10 @@ func TestFolder_CopyFolderTo(t *testing.T) {
 		mock.ExpectQuery("SELECT(.+)").
 			WithArgs(1, 2, 3, 4).
 			WillReturnRows(
-				sqlmock.NewRows([]string{"id", "name", "folder_id", "size"}).
-					AddRow(1, "2.txt", 2, 10).
-					AddRow(2, "3.txt", 3, 20),
+				sqlmock.NewRows([]string{"id", "name", "folder_id", "size", "upload_session_id"}).
+					AddRow(1, "2.txt", 2, 10, nil).
+					AddRow(2, "3.txt", 3, 20, nil).
+					AddRow(3, "5.txt", 3, 20, &dstFolder.Name),
 			)
 
 		// 复制子文件
@@ -493,7 +496,8 @@ func TestFolder_MoveOrCopyFolderTo_Move(t *testing.T) {
 	}
 	// 目标目录
 	dstFolder := Folder{
-		Model: gorm.Model{ID: 10},
+		Model:   gorm.Model{ID: 10},
+		OwnerID: 1,
 	}
 
 	// 成功
@@ -506,6 +510,12 @@ func TestFolder_MoveOrCopyFolderTo_Move(t *testing.T) {
 		err := parFolder.MoveFolderTo([]uint{1, 2}, &dstFolder)
 		asserts.NoError(mock.ExpectationsWereMet())
 		asserts.NoError(err)
+	}
+
+	// 移动自己到自己内部，失败
+	{
+		err := parFolder.MoveFolderTo([]uint{10, 2}, &dstFolder)
+		asserts.Error(err)
 	}
 }
 

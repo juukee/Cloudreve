@@ -12,12 +12,10 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	model "github.com/cloudreve/Cloudreve/v3/models"
 	"github.com/cloudreve/Cloudreve/v3/pkg/cache"
 	"github.com/cloudreve/Cloudreve/v3/pkg/filesystem"
-	"github.com/cloudreve/Cloudreve/v3/pkg/filesystem/driver/local"
 	"github.com/cloudreve/Cloudreve/v3/pkg/filesystem/fsctx"
 	"github.com/cloudreve/Cloudreve/v3/pkg/serializer"
 	"github.com/gin-gonic/gin"
@@ -43,6 +41,11 @@ type DownloadService struct {
 	ID string `uri:"id" binding:"required"`
 }
 
+// ArchiveService 文件流式打包下載服务
+type ArchiveService struct {
+	ID string `uri:"sessionID" binding:"required"`
+}
+
 // New 创建新文件
 func (service *SingleFileService) Create(c *gin.Context) serializer.Response {
 	// 创建文件系统
@@ -55,14 +58,13 @@ func (service *SingleFileService) Create(c *gin.Context) serializer.Response {
 	// 上下文
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ctx = context.WithValue(ctx, fsctx.DisableOverwrite, true)
 
 	// 给文件系统分配钩子
 	fs.Use("BeforeUpload", filesystem.HookValidateFile)
 	fs.Use("AfterUpload", filesystem.GenericAfterUpload)
 
 	// 上传空文件
-	err = fs.Upload(ctx, local.FileStream{
+	err = fs.Upload(ctx, &fsctx.FileStream{
 		File:        ioutil.NopCloser(strings.NewReader("")),
 		Size:        0,
 		VirtualPath: path.Dir(service.Path),
@@ -95,41 +97,41 @@ func (service *SlaveListService) List(c *gin.Context) serializer.Response {
 	return serializer.Response{Data: string(res)}
 }
 
-// DownloadArchived 下載已打包的多文件
-func (service *DownloadService) DownloadArchived(ctx context.Context, c *gin.Context) serializer.Response {
+// DownloadArchived 通过预签名 URL 打包下载
+func (service *ArchiveService) DownloadArchived(ctx context.Context, c *gin.Context) serializer.Response {
+	userRaw, exist := cache.Get("archive_user_" + service.ID)
+	if !exist {
+		return serializer.Err(404, "归档会话不存在", nil)
+	}
+	user := userRaw.(model.User)
+
 	// 创建文件系统
-	fs, err := filesystem.NewFileSystemFromContext(c)
+	fs, err := filesystem.NewFileSystem(&user)
 	if err != nil {
 		return serializer.Err(serializer.CodePolicyNotAllowed, err.Error(), err)
 	}
 	defer fs.Recycle()
 
 	// 查找打包的临时文件
-	zipPath, exist := cache.Get("archive_" + service.ID)
+	archiveSession, exist := cache.Get("archive_" + service.ID)
 	if !exist {
-		return serializer.Err(404, "归档文件不存在", nil)
+		return serializer.Err(404, "归档会话不存在", nil)
 	}
 
-	// 获取文件流
-	rs, err := fs.GetPhysicalFileContent(ctx, zipPath.(string))
-	defer rs.Close()
-	if err != nil {
-		return serializer.Err(serializer.CodeNotSet, err.Error(), err)
-	}
-
-	if fs.User.Group.OptionsSerialized.OneTimeDownload {
-		// 清理资源，删除临时文件
-		_ = cache.Deletes([]string{service.ID}, "archive_")
-	}
-
+	// 开始打包
 	c.Header("Content-Disposition", "attachment;")
 	c.Header("Content-Type", "application/zip")
-	http.ServeContent(c.Writer, c.Request, "", time.Now(), rs)
+	itemService := archiveSession.(ItemIDService)
+	items := itemService.Raw()
+	ctx = context.WithValue(ctx, fsctx.GinCtx, c)
+	err = fs.Compress(ctx, c.Writer, items.Dirs, items.Items, true)
+	if err != nil {
+		return serializer.Err(serializer.CodeNotSet, "无法创建压缩文件", err)
+	}
 
 	return serializer.Response{
 		Code: 0,
 	}
-
 }
 
 // Download 签名的匿名文件下载
@@ -372,10 +374,11 @@ func (service *FileIDService) PutContent(ctx context.Context, c *gin.Context) se
 		return serializer.ParamErr("无法解析文件尺寸", err)
 	}
 
-	fileData := local.FileStream{
+	fileData := fsctx.FileStream{
 		MIMEType: c.Request.Header.Get("Content-Type"),
 		File:     c.Request.Body,
 		Size:     fileSize,
+		Mode:     fsctx.Overwrite,
 	}
 
 	// 创建文件系统
@@ -397,7 +400,7 @@ func (service *FileIDService) PutContent(ctx context.Context, c *gin.Context) se
 	fileList, err := model.RemoveFilesWithSoftLinks([]model.File{originFile[0]})
 	if err == nil && len(fileList) == 0 {
 		// 如果包含软连接，应重新生成新文件副本，并更新source_name
-		originFile[0].SourceName = fs.GenerateSavePath(uploadCtx, fileData)
+		originFile[0].SourceName = fs.GenerateSavePath(uploadCtx, &fileData)
 		fs.Use("AfterUpload", filesystem.HookUpdateSourceName)
 		fs.Use("AfterUploadCanceled", filesystem.HookUpdateSourceName)
 		fs.Use("AfterValidateFailed", filesystem.HookUpdateSourceName)
@@ -406,18 +409,16 @@ func (service *FileIDService) PutContent(ctx context.Context, c *gin.Context) se
 	// 给文件系统分配钩子
 	fs.Use("BeforeUpload", filesystem.HookResetPolicy)
 	fs.Use("BeforeUpload", filesystem.HookValidateFile)
-	fs.Use("BeforeUpload", filesystem.HookChangeCapacity)
+	fs.Use("BeforeUpload", filesystem.HookValidateCapacityDiff)
 	fs.Use("AfterUploadCanceled", filesystem.HookCleanFileContent)
 	fs.Use("AfterUploadCanceled", filesystem.HookClearFileSize)
-	fs.Use("AfterUploadCanceled", filesystem.HookGiveBackCapacity)
 	fs.Use("AfterUpload", filesystem.GenericAfterUpdate)
 	fs.Use("AfterValidateFailed", filesystem.HookCleanFileContent)
 	fs.Use("AfterValidateFailed", filesystem.HookClearFileSize)
-	fs.Use("AfterValidateFailed", filesystem.HookGiveBackCapacity)
 
 	// 执行上传
 	uploadCtx = context.WithValue(uploadCtx, fsctx.FileModelCtx, originFile[0])
-	err = fs.Upload(uploadCtx, fileData)
+	err = fs.Upload(uploadCtx, &fileData)
 	if err != nil {
 		return serializer.Err(serializer.CodeUploadFailed, err.Error(), err)
 	}

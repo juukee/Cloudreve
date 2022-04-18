@@ -3,6 +3,7 @@ package model
 import (
 	"crypto/md5"
 	"crypto/sha1"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -46,6 +47,10 @@ type User struct {
 	OptionsSerialized UserOption `gorm:"-"`
 }
 
+func init() {
+	gob.Register(User{})
+}
+
 // UserOption 用户个性化配置字段
 type UserOption struct {
 	ProfileOff     bool   `json:"profile_off,omitempty"`
@@ -87,6 +92,11 @@ func (user *User) IncreaseStorage(size uint64) bool {
 		return true
 	}
 	return false
+}
+
+// ChangeStorage 更新用户容量
+func (user *User) ChangeStorage(tx *gorm.DB, operator string, size uint64) error {
+	return tx.Model(user).Update("storage", gorm.Expr("storage "+operator+" ?", size)).Error
 }
 
 // IncreaseStorageWithoutCheck 忽略可用容量，增加用户已用容量
